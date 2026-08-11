@@ -1,0 +1,1 @@
+Your task is to create a Python package that compiles 24-hour weather reports published at https://meteo.gov.lk/. You have to save the files daily from here on for three months. Your package should have functionality to automate data extraction and create a tidy dataset.
