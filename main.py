@@ -1,39 +1,30 @@
-name: Daily Weather Scraper
+import os
+import requests
+import pandas as pd
+from datetime import datetime
 
-# Run automatically every day at 18:30 PM UTC (12:00 AM Sri Lanka Time)
-on:
-  schedule:
-    - cron: '30 18 * * *'
-  # Allows you to manually trigger the workflow anytime to test
-  workflow_dispatch:
+# Ensure the output directory exists
+os.makedirs("data", exist_ok=True)
 
-permissions:
-  contents: write  # Grants permission to upload saved CSV data back to your repo
+def run_scraper():
+    today = datetime.now().strftime("%Y-%m-%d")
+    print(f"[{today}] Starting weather collection...")
 
-jobs:
-  scrape-weather:
-    runs-on: ubuntu-latest
+    # Define path for daily raw or tidy output
+    output_file = "data/weather_tidy.csv"
 
-    steps:
-    - name: Check out repository code
-      uses: actions/checkout@v4
+    # Minimal test payload - replace/expand with your meteo.gov.lk scraping logic
+    data = [{
+        "date": today,
+        "status": "Scraper executed successfully"
+    }]
+    
+    df = pd.DataFrame(data)
+    
+    # Append data to CSV if it exists, otherwise create new file
+    file_exists = os.path.exists(output_file)
+    df.to_csv(output_file, mode="a", index=False, header=not file_exists)
+    print(f"[{today}] Data saved successfully to {output_file}")
 
-    - name: Set up Python 3.10
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
-
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-
-    - name: Run Weather Scraper
-      run: python main.py
-
-    - name: Commit and push updated dataset
-      run: |
-        git config --global user.name 'github-actions[bot]'
-        git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-        git add data/
-        git diff --quiet && git diff --staged --quiet || (git commit -m "Automated daily weather update [$(date +'%Y-%m-%d')]" && git push)
+if __name__ == "__main__":
+    run_scraper()
