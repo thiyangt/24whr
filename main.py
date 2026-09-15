@@ -1,0 +1,39 @@
+name: Daily Weather Scraper
+
+# Run automatically every day at 18:30 PM UTC (12:00 AM Sri Lanka Time)
+on:
+  schedule:
+    - cron: '30 18 * * *'
+  # Allows you to manually trigger the workflow anytime to test
+  workflow_dispatch:
+
+permissions:
+  contents: write  # Grants permission to upload saved CSV data back to your repo
+
+jobs:
+  scrape-weather:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check out repository code
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run Weather Scraper
+      run: python main.py
+
+    - name: Commit and push updated dataset
+      run: |
+        git config --global user.name 'github-actions[bot]'
+        git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+        git add data/
+        git diff --quiet && git diff --staged --quiet || (git commit -m "Automated daily weather update [$(date +'%Y-%m-%d')]" && git push)
