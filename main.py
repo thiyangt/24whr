@@ -10,6 +10,8 @@ import io
 
 def fetch_and_save_weather():
     base_url = "https://meteo.gov.lk"
+    
+    # Direct PDF endpoint for the 24-hour weather report published by meteo.gov.lk
     pdf_url = "https://meteo.gov.lk/pdfs/twentyfour_pdf.pdf"
     
     print(f"Downloading 24-hour weather report from: {pdf_url}")
@@ -17,7 +19,7 @@ def fetch_and_save_weather():
         pdf_res = requests.get(pdf_url)
         pdf_res.raise_for_status()
     except Exception as e:
-        print(f"Direct PDF fetch failed: {e}. Trying website fallback...")
+        print(f"Direct PDF fetch failed: {e}. Trying fallback website scrape...")
         response = requests.get(base_url)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -33,61 +35,68 @@ def fetch_and_save_weather():
 
     os.makedirs("data", exist_ok=True)
     date_str = datetime.now().strftime("%Y-%m-%d")
-    # Using Excel format (.xlsx) to support true multi-sheet separation
-    output_file = f"data/weather_report_{date_str}.xlsx"
+    output_csv = f"data/weather_report_{date_str}.csv"
 
-    main_stations = []
-    hydro_catchment = []
-    other_rainfall = []
-    
-    current_category = "main"
+    all_stations_data = []
 
+    # Extract all tables and rows across pages of the PDF report
     with pdfplumber.open(io.BytesIO(pdf_res.content)) as pdf:
         for page in pdf.pages:
-            text = page.extract_text()
-            if text:
-                for line in text.split('\n'):
-                    line_lower = line.lower()
-                    # Detect section headings in the text report
-                    if "hydro catchment" in line_lower:
-                        current_category = "hydro"
-                        continue
-                    elif "other rainfall" in line_lower or "other stations" in line_lower:
-                        current_category = "other"
-                        continue
-                    
-                    # Process lines containing numbers (station data rows)
-                    if any(char.isdigit() for char in line):
-                        parts = line.split()
-                        if len(parts) >= 2:
-                            station_record = {
-                                "date": date_str,
-                                "station": parts[0],
-                                "rainfall_mm": parts[1] if len(parts) > 1 else "",
-                                "max_temp_c": parts[2] if len(parts) > 2 else "",
-                                "min_temp_c": parts[3] if len(parts) > 3 else "",
-                                "relative_humidity_pct": parts[4] if len(parts) > 4 else ""
-                            }
-                            
-                            if current_category == "hydro":
-                                hydro_catchment.append(station_record)
-                            elif current_category == "other":
-                                other_rainfall.append(station_record)
-                            else:
-                                main_stations.append(station_record)
+            tables = page.extract_tables()
+            for table in tables:
+                for row in table:
+                    # Clean up cells
+                    cleaned_row = [str(cell).strip().replace('\n', ' ') if cell else '' for cell in row]
+                    if any(cleaned_row):
+                        all_stations_data.append(cleaned_row)
 
-    # Convert to DataFrames
-    df_main = pd.DataFrame(main_stations).drop_duplicates(subset=["station"])
-    df_hydro = pd.DataFrame(hydro_catchment).drop_duplicates(subset=["station"])
-    df_other = pd.DataFrame(other_rainfall).drop_duplicates(subset=["station"])
+    records = []
+    for row in all_stations_data:
+        # Filter rows that look like station data entries (must have text and numbers)
+        row_text = " ".join([val for val in row if val])
+        if len(row) >= 2 and any(char.isdigit() for char in row_text):
+            station_name = str(row[0]).strip()
+            
+            # Skip title or header rows
+            skip_keywords = ["station", "district", "department", "meteorology", "table", "slts"]
+            if any(kw in station_name.lower() for kw in skip_keywords) or not station_name:
+                continue
 
-    # Save into separate sheets within the same Excel workbook
-    with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
-        df_main.to_excel(writer, sheet_name='Main Stations', index=False)
-        df_hydro.to_excel(writer, sheet_name='Hydro Catchment Areas', index=False)
-        df_other.to_excel(writer, sheet_name='Other Rainfall Stations', index=False)
+            records.append({
+                "date": date_str,
+                "station": station_name,
+                "rainfall_mm": row[1] if len(row) > 1 else "",
+                "max_temp_c": row[2] if len(row) > 2 else "",
+                "min_temp_c": row[3] if len(row) > 3 else "",
+                "relative_humidity_pct": row[4] if len(row) > 4 else ""
+            })
 
-    print(f"Successfully saved categorized dataset to Excel sheet workbook: {output_file}")
+    # Fallback if table extraction structure varies
+    if not records:
+        print("Warning: Standard table layout not found, extracting raw text lines as fallback.")
+        with pdfplumber.open(io.BytesIO(pdf_res.content)) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text()
+                if text:
+                    for line in text.split('\n'):
+                        if any(char.isdigit() for char in line):
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                records.append({
+                                    "date": date_str,
+                                    "station": parts[0],
+                                    "rainfall_mm": parts[1] if len(parts) > 1 else "",
+                                    "max_temp_c": parts[2] if len(parts) > 2 else "",
+                                    "min_temp_c": parts[3] if len(parts) > 3 else "",
+                                    "relative_humidity_pct": parts[4] if len(parts) > 4 else ""
+                                })
+
+    df = pd.DataFrame(records)
+    # Remove duplicate station rows if captured multiple times
+    df.drop_duplicates(subset=["station"], keep="first", inplace=True)
+    
+    df.to_csv(output_csv, index=False)
+    print(f"Successfully compiled tidy dataset with {len(df)} stations: {output_csv}")
 
 def cleanup_old_files():
     data_dir = "data"
@@ -95,14 +104,13 @@ def cleanup_old_files():
     cutoff_seconds = 90 * 86400  # 90 days
     
     if os.path.exists(data_dir):
-        # Cleans up old excel or csv history files
-        for file_path in glob.glob(f"{data_dir}/weather_report_*.*"):
+        for file_path in glob.glob(f"{data_dir}/*.csv"):
             if (now - os.path.getmtime(file_path)) > cutoff_seconds:
                 os.remove(file_path)
                 print(f"Removed old report: {file_path}")
 
 if __name__ == "__main__":
-    print("Starting categorized weather extraction...")
+    print("Starting multi-station weather extraction...")
     fetch_and_save_weather()
     cleanup_old_files()
     print("Process completed successfully.")
