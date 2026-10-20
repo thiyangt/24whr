@@ -1,13 +1,12 @@
-name: Automated 24-Hour Weather Compilation
+name: Daily Weather Scraper
 
 on:
   schedule:
-    # Runs everyday at 18:30 UTC (adjust timing as needed for Sri Lanka Standard Time 00:00)
-    - cron: '30 18 * * *'
-  workflow_dispatch: 
+    - cron: '30 18 * * *' # Runs daily at 18:30 UTC. 00:00 Sri Lankan time
+  workflow_dispatch:
 
 jobs:
-  fetch-weather-data:
+  run-scraper:
     runs-on: ubuntu-latest
     permissions:
       contents: write 
@@ -22,24 +21,18 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install dependencies and package
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install .
+          pip install -r requirements.txt
 
-      - name: Run weather extraction and tidy dataset generation
+      - name: Run main weather script
         run: |
-          # Executes your package's main routine to scrape meteo.gov.lk and save daily file
-          python -m meteo_compiler.cli run
+          python main.py
 
-      - name: Clean up files older than 3 months (90 days)
-        run: |
-          # Removes files older than 90 days in the data directory to maintain a 3-month window
-          find data/ -type f -mtime +90 -exec rm {} +
-
-      - name: Commit and push updated dataset files
+      - name: Commit and push updated dataset
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           git add data/
-          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: update daily 24-hour weather report dataset [skip ci]" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: update daily weather dataset [skip ci]" && git push)
