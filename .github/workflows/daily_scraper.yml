@@ -2,15 +2,15 @@ name: Daily Weather Scraper & Workbook Compiler
 
 on:
   schedule:
-    # Runs everyday at 23:30 UTC (Adjust as needed for your preferred local time)
-    - cron: '30 23 * * *'
-  workflow_dispatch: # Allows you to manually trigger it from the GitHub Actions tab anytime
+    # Runs everyday at 18:30 UTC (00:00 Sri Lankan time)
+    - cron: '30 18 * * *'
+  workflow_dispatch:
 
 jobs:
   run-weather-pipeline:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Required to allow GitHub Actions to commit and push the updated .xlsx file back into your repository
+      contents: write 
 
     steps:
       - name: Checkout repository
