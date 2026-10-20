@@ -1,15 +1,16 @@
-name: Daily Weather Scraper
+name: Daily Weather Scraper & Workbook Compiler
 
 on:
   schedule:
-    - cron: '30 18 * * *' # Runs daily at 18:30 UTC. 00:00 Sri Lankan time
-  workflow_dispatch:
+    # Runs everyday at 23:30 UTC (Adjust as needed for your preferred local time)
+    - cron: '30 23 * * *'
+  workflow_dispatch: # Allows you to manually trigger it from the GitHub Actions tab anytime
 
 jobs:
-  run-scraper:
+  run-weather-pipeline:
     runs-on: ubuntu-latest
     permissions:
-      contents: write 
+      contents: write # Required to allow GitHub Actions to commit and push the updated .xlsx file back into your repository
 
     steps:
       - name: Checkout repository
@@ -26,13 +27,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run main weather script
+      - name: Run main weather extraction script
         run: |
           python main.py
 
-      - name: Commit and push updated dataset
+      - name: Commit and push updated dataset workbook
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           git add data/
-          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: update daily weather dataset [skip ci]" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: update categorized daily weather excel workbook [skip ci]" && git push)
