@@ -1,13 +1,12 @@
-name: Daily Weather Scraper & Workbook Compiler
+name: Daily Weather Scraper
 
 on:
   schedule:
-    # Runs everyday at 18:30 UTC (00:00 Sri Lankan time)
-    - cron: '30 18 * * *'
+    - cron: '30 18 * * *' # Runs daily at 00:00 Sri Lankan time
   workflow_dispatch:
 
 jobs:
-  run-weather-pipeline:
+  run-scraper:
     runs-on: ubuntu-latest
     permissions:
       contents: write 
@@ -27,13 +26,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run main weather extraction script
+      - name: Run main weather script
         run: |
           python main.py
 
-      - name: Commit and push updated dataset workbook
+      - name: Commit and push updated dataset
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           git add data/
-          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: update categorized daily weather excel workbook [skip ci]" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: update daily weather dataset [skip ci]" && git push)
