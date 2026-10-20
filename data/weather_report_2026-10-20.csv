@@ -1,2 +1,1 @@
-date,station,temperature_c,rainfall_mm,humidity_pct
-2026-10-20,Colombo,30.0,0.0,75.0
+date,station,rainfall_mm,max_temp_c,min_temp_c,relative_humidity_pct
