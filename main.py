@@ -37,17 +37,189 @@ HEADERS = {
 def download_report():
     """
     Download the latest 24-hour weather report PDF.
+
+    Uses retries and falls back to the official
+    Department of Meteorology website if the direct
+    PDF URL cannot be reached.
     """
 
-    print(f"Downloading report from: {PDF_URL}")
+    session = requests.Session()
 
-    response = requests.get(
-        PDF_URL,
-        headers=HEADERS,
-        timeout=30
+    session.headers.update(HEADERS)
+
+    # --------------------------------------------------------
+    # Attempt 1: Direct PDF URL
+    # --------------------------------------------------------
+
+    for attempt in range(1, 4):
+
+        print(
+            f"Attempt {attempt}/3: "
+            f"Downloading report from {PDF_URL}"
+        )
+
+        try:
+
+            response = session.get(
+                PDF_URL,
+                timeout=(15, 60)
+            )
+
+            response.raise_for_status()
+
+            # Make sure we received something substantial
+            if len(response.content) < 1000:
+
+                raise RuntimeError(
+                    "Downloaded response is too small to be a PDF."
+                )
+
+            print(
+                "Successfully downloaded the "
+                "24-hour weather report."
+            )
+
+            return response.content
+
+        except requests.exceptions.RequestException as error:
+
+            print(
+                f"Direct PDF attempt {attempt} failed: "
+                f"{error}"
+            )
+
+            if attempt < 3:
+
+                wait_seconds = attempt * 10
+
+                print(
+                    f"Waiting {wait_seconds} seconds "
+                    "before retrying..."
+                )
+
+                time.sleep(wait_seconds)
+
+    # --------------------------------------------------------
+    # Attempt 2: Open official website
+    # --------------------------------------------------------
+
+    print(
+        "Direct PDF download failed."
     )
 
-    response.raise_for_status()
+    print(
+        "Trying the official Department of "
+        "Meteorology website..."
+    )
+
+    try:
+
+        response = session.get(
+            BASE_URL,
+            timeout=(15, 60)
+        )
+
+        response.raise_for_status()
+
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
+
+        report_url = None
+
+        # Search all links for 24 Hour Weather Report
+        for link in soup.find_all(
+            "a",
+            href=True
+        ):
+
+            link_text = link.get_text(
+                " ",
+                strip=True
+            ).lower()
+
+            href = link["href"]
+
+            if (
+                "24 hour weather report"
+                in link_text
+            ):
+
+                report_url = href
+
+                break
+
+        # ----------------------------------------------------
+        # Also search for the known PDF filename
+        # ----------------------------------------------------
+
+        if report_url is None:
+
+            for link in soup.find_all(
+                "a",
+                href=True
+            ):
+
+                href = link["href"]
+
+                if (
+                    "twentyfour_pdf.pdf"
+                    in href.lower()
+                ):
+
+                    report_url = href
+
+                    break
+
+        if report_url is None:
+
+            raise RuntimeError(
+                "Could not find the 24-hour weather "
+                "report link on the official website."
+            )
+
+        # Convert relative URL to absolute URL
+        report_url = requests.compat.urljoin(
+            BASE_URL,
+            report_url
+        )
+
+        print(
+            f"Found report URL: {report_url}"
+        )
+
+        # ----------------------------------------------------
+        # Download report found through website
+        # ----------------------------------------------------
+
+        response = session.get(
+            report_url,
+            timeout=(15, 60)
+        )
+
+        response.raise_for_status()
+
+        if len(response.content) < 1000:
+
+            raise RuntimeError(
+                "Fallback report download is too small."
+            )
+
+        print(
+            "Successfully downloaded the report "
+            "using the official website."
+        )
+
+        return response.content
+
+    except Exception as error:
+
+        raise RuntimeError(
+            "Unable to download the official "
+            "24-hour weather report after all "
+            "attempts."
+        ) from error
 
     # Check that the response is actually a PDF
     content_type = response.headers.get(
