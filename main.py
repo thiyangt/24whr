@@ -1,11 +1,13 @@
-import io
+import os
 import re
 import time
-from pathlib import Path
+from io import BytesIO
+from datetime import datetime
 
+import requests
 import pandas as pd
 import pdfplumber
-import requests
+from bs4 import BeautifulSoup
 
 
 # ============================================================
@@ -13,21 +15,47 @@ import requests
 # ============================================================
 
 BASE_URL = "https://meteo.gov.lk"
-PDF_URL = f"{BASE_URL}/pdfs/twentyfour_pdf.pdf"
+PDF_URL = "https://meteo.gov.lk/pdfs/twentyfour_pdf.pdf"
 
-DATA_DIR = Path("data")
-RAW_DIR = DATA_DIR / "raw"
-DAILY_DIR = DATA_DIR / "daily"
+DATA_DIR = "data"
+RAW_DIR = os.path.join(DATA_DIR, "raw")
+DAILY_DIR = os.path.join(DATA_DIR, "daily")
+
+MASTER_FILE = os.path.join(DATA_DIR, "weather_tidy.csv")
 
 RETENTION_DAYS = 90
 
+
+# Browser-like headers help reduce the chance of simple
+# bot/firewall blocking.
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/120.0.0.0 Safari/537.36"
-    )
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;"
+        "q=0.9,image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
 }
+
+
+# ============================================================
+# DIRECTORY SETUP
+# ============================================================
+
+def create_directories():
+    """
+    Create the required data directories if they do not exist.
+    """
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(RAW_DIR, exist_ok=True)
+    os.makedirs(DAILY_DIR, exist_ok=True)
+
+    print("Data directories are ready.")
 
 
 # ============================================================
@@ -38,27 +66,34 @@ def download_report():
     """
     Download the latest 24-hour weather report PDF.
 
-    Uses retries and falls back to the official
-    Department of Meteorology website if the direct
-    PDF URL cannot be reached.
+    The function:
+    1. Tries the direct PDF URL three times.
+    2. If that fails, connects to the official website.
+    3. Attempts to find the latest 24-hour report link.
+    4. Downloads the PDF from the discovered URL.
+
+    Returns:
+        bytes: PDF file content.
     """
 
     session = requests.Session()
-
     session.headers.update(HEADERS)
 
     # --------------------------------------------------------
     # Attempt 1: Direct PDF URL
     # --------------------------------------------------------
 
+    print("=" * 70)
+    print("STEP 1: Downloading the 24-hour weather report")
+    print("=" * 70)
+
     for attempt in range(1, 4):
 
-        print(
-            f"Attempt {attempt}/3: "
-            f"Downloading report from {PDF_URL}"
-        )
-
         try:
+            print(
+                f"Attempt {attempt}/3: "
+                f"Connecting to {PDF_URL}"
+            )
 
             response = session.get(
                 PDF_URL,
@@ -67,16 +102,23 @@ def download_report():
 
             response.raise_for_status()
 
-            # Make sure we received something substantial
+            # Basic validation to make sure the response
+            # actually contains something resembling a PDF.
             if len(response.content) < 1000:
-
                 raise RuntimeError(
-                    "Downloaded response is too small to be a PDF."
+                    "Downloaded response is too small to be a valid PDF."
+                )
+
+            # Check PDF signature when available.
+            if not response.content.startswith(b"%PDF"):
+                print(
+                    "Warning: response does not start with the "
+                    "usual PDF signature."
                 )
 
             print(
-                "Successfully downloaded the "
-                "24-hour weather report."
+                f"Download successful. "
+                f"Received {len(response.content):,} bytes."
             )
 
             return response.content
@@ -84,35 +126,47 @@ def download_report():
         except requests.exceptions.RequestException as error:
 
             print(
-                f"Direct PDF attempt {attempt} failed: "
-                f"{error}"
+                f"Attempt {attempt}/3 failed: {error}"
             )
 
             if attempt < 3:
-
                 wait_seconds = attempt * 10
 
                 print(
                     f"Waiting {wait_seconds} seconds "
-                    "before retrying..."
+                    f"before retrying..."
+                )
+
+                time.sleep(wait_seconds)
+
+        except Exception as error:
+
+            print(
+                f"Attempt {attempt}/3 failed: {error}"
+            )
+
+            if attempt < 3:
+                wait_seconds = attempt * 10
+
+                print(
+                    f"Waiting {wait_seconds} seconds "
+                    f"before retrying..."
                 )
 
                 time.sleep(wait_seconds)
 
     # --------------------------------------------------------
-    # Attempt 2: Open official website
+    # Attempt 2: Official website fallback
     # --------------------------------------------------------
 
-    print(
-        "Direct PDF download failed."
-    )
-
-    print(
-        "Trying the official Department of "
-        "Meteorology website..."
-    )
+    print()
+    print("=" * 70)
+    print("STEP 2: Trying the official website as a fallback")
+    print("=" * 70)
 
     try:
+
+        print(f"Connecting to: {BASE_URL}")
 
         response = session.get(
             BASE_URL,
@@ -121,6 +175,8 @@ def download_report():
 
         response.raise_for_status()
 
+        print("Official website loaded successfully.")
+
         soup = BeautifulSoup(
             response.text,
             "html.parser"
@@ -128,11 +184,12 @@ def download_report():
 
         report_url = None
 
-        # Search all links for 24 Hour Weather Report
-        for link in soup.find_all(
-            "a",
-            href=True
-        ):
+        # ----------------------------------------------------
+        # Search for a link whose text contains
+        # "24 hour weather report"
+        # ----------------------------------------------------
+
+        for link in soup.find_all("a", href=True):
 
             link_text = link.get_text(
                 " ",
@@ -141,57 +198,59 @@ def download_report():
 
             href = link["href"]
 
-            if (
-                "24 hour weather report"
-                in link_text
-            ):
+            if "24 hour weather report" in link_text:
 
                 report_url = href
+
+                print(
+                    "Found 24-hour weather report link "
+                    "from website."
+                )
 
                 break
 
         # ----------------------------------------------------
-        # Also search for the known PDF filename
+        # If not found, search for the known PDF filename.
         # ----------------------------------------------------
 
         if report_url is None:
 
-            for link in soup.find_all(
-                "a",
-                href=True
-            ):
+            for link in soup.find_all("a", href=True):
 
                 href = link["href"]
 
-                if (
-                    "twentyfour_pdf.pdf"
-                    in href.lower()
-                ):
+                if "twentyfour_pdf.pdf" in href.lower():
 
                     report_url = href
 
+                    print(
+                        "Found twentyfour_pdf.pdf "
+                        "link from website."
+                    )
+
                     break
+
+        # ----------------------------------------------------
+        # Stop if no report link was found.
+        # ----------------------------------------------------
 
         if report_url is None:
 
             raise RuntimeError(
-                "Could not find the 24-hour weather "
-                "report link on the official website."
+                "Could not locate the 24-hour weather report "
+                "PDF link on the official website."
             )
 
-        # Convert relative URL to absolute URL
+        # Convert relative URL to absolute URL.
         report_url = requests.compat.urljoin(
             BASE_URL,
             report_url
         )
 
         print(
-            f"Found report URL: {report_url}"
+            f"Downloading report from discovered URL:\n"
+            f"{report_url}"
         )
-
-        # ----------------------------------------------------
-        # Download report found through website
-        # ----------------------------------------------------
 
         response = session.get(
             report_url,
@@ -203,12 +262,13 @@ def download_report():
         if len(response.content) < 1000:
 
             raise RuntimeError(
-                "Fallback report download is too small."
+                "Downloaded fallback response is too small "
+                "to be a valid PDF."
             )
 
         print(
-            "Successfully downloaded the report "
-            "using the official website."
+            f"Fallback download successful. "
+            f"Received {len(response.content):,} bytes."
         )
 
         return response.content
@@ -216,23 +276,11 @@ def download_report():
     except Exception as error:
 
         raise RuntimeError(
-            "Unable to download the official "
-            "24-hour weather report after all "
-            "attempts."
+            "Unable to download the 24-hour weather report "
+            "from the Department of Meteorology website. "
+            "The GitHub Actions runner may be unable to "
+            "connect to the website."
         ) from error
-
-    # Check that the response is actually a PDF
-    content_type = response.headers.get(
-        "Content-Type",
-        ""
-    ).lower()
-
-    if "pdf" not in content_type:
-        print(
-            f"Warning: unexpected Content-Type: {content_type}"
-        )
-
-    return response.content
 
 
 # ============================================================
@@ -241,44 +289,93 @@ def download_report():
 
 def extract_report_date(pdf_bytes):
     """
-    Extract the report date from the PDF text.
+    Extract the actual report date from the PDF.
 
-    The report uses a date such as:
-    2026.10.28
+    The Department of Meteorology report commonly contains
+    dates in formats such as:
+
+        2026.10.28
+        2026.10.27
+
+    Returns:
+        str: Date in YYYY-MM-DD format.
+
+    Raises:
+        ValueError: If a report date cannot be found.
     """
 
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+    print()
+    print("=" * 70)
+    print("STEP 3: Extracting report date")
+    print("=" * 70)
 
-        full_text = ""
+    date_patterns = [
+        r"\b(20\d{2})[./-](\d{1,2})[./-](\d{1,2})\b",
+    ]
 
-        for page in pdf.pages:
+    all_dates = []
+
+    with pdfplumber.open(
+        BytesIO(pdf_bytes)
+    ) as pdf:
+
+        for page_number, page in enumerate(
+            pdf.pages,
+            start=1
+        ):
+
             text = page.extract_text() or ""
-            full_text += "\n" + text
 
-    # Look for YYYY.MM.DD
-    match = re.search(
-        r"(20\d{2})[./-](\d{1,2})[./-](\d{1,2})",
-        full_text
-    )
+            for pattern in date_patterns:
 
-    if not match:
+                matches = re.findall(
+                    pattern,
+                    text
+                )
+
+                for match in matches:
+
+                    try:
+
+                        year = int(match[0])
+                        month = int(match[1])
+                        day = int(match[2])
+
+                        date_object = datetime(
+                            year,
+                            month,
+                            day
+                        )
+
+                        all_dates.append(
+                            date_object
+                        )
+
+                    except ValueError:
+                        continue
+
+    if not all_dates:
+
         raise ValueError(
-            "Could not find the report date inside the PDF."
+            "Could not find a valid report date in the PDF."
         )
 
-    year, month, day = match.groups()
+    # Usually the first relevant date is the report date.
+    report_date = min(all_dates)
 
-    report_date = (
-        f"{int(year):04d}-"
-        f"{int(month):02d}-"
-        f"{int(day):02d}"
+    date_string = report_date.strftime(
+        "%Y-%m-%d"
     )
 
-    return report_date
+    print(
+        f"Report date detected: {date_string}"
+    )
+
+    return date_string
 
 
 # ============================================================
-# HELPER FUNCTIONS
+# CELL CLEANING
 # ============================================================
 
 def clean_cell(value):
@@ -289,446 +386,791 @@ def clean_cell(value):
     if value is None:
         return ""
 
-    return (
-        str(value)
-        .replace("\n", " ")
-        .strip()
+    value = str(value)
+
+    # Replace line breaks with spaces.
+    value = value.replace("\n", " ")
+
+    # Remove repeated whitespace.
+    value = re.sub(
+        r"\s+",
+        " ",
+        value
     )
 
+    return value.strip()
+
+
+# ============================================================
+# NUMERIC CONVERSION
+# ============================================================
 
 def to_number(value):
     """
-    Convert a PDF cell to a number.
+    Convert a PDF cell into a numeric value.
 
-    'Trace' rainfall is represented as 0.001.
+    Examples:
+        '31.2' -> 31.2
+        '31.2 C' -> 31.2
+        '-' -> None
+        'T' -> 0.0
+
+    Returns:
+        float or None
     """
 
     if value is None:
         return None
 
-    value = str(value).strip()
+    value = clean_cell(value)
 
-    if not value:
+    if value == "":
         return None
 
-    if value.lower() == "trace":
-        return 0.001
+    value_upper = value.upper()
 
+    # Trace rainfall is conventionally treated as zero
+    # for the numeric tidy dataset.
+    if value_upper in {
+        "T",
+        "TRACE"
+    }:
+        return 0.0
+
+    # Missing values.
+    if value_upper in {
+        "-",
+        "--",
+        "NA",
+        "N/A",
+        "NAN"
+    }:
+        return None
+
+    # Extract the first decimal/integer number.
     match = re.search(
         r"-?\d+(?:\.\d+)?",
         value
     )
 
-    if match:
-        return float(match.group())
+    if not match:
+        return None
 
-    return None
+    try:
+        return float(match.group(0))
+
+    except ValueError:
+        return None
 
 
-def extract_english_station_name(value):
+# ============================================================
+# STATION NAME CLEANING
+# ============================================================
+
+def clean_station_name(value):
     """
-    Extract the English station name from the
-    multilingual station cell.
+    Clean station names extracted from the PDF.
     """
 
     value = clean_cell(value)
 
-    # English station name normally appears at the
-    # end of the multilingual station cell.
-    matches = re.findall(
-        r"[A-Za-z][A-Za-z\s().'\-/]*$",
+    if not value:
+        return ""
+
+    # Remove leading numbering such as:
+    # 1. Colombo
+    # 01 Colombo
+    # 1 Colombo
+    value = re.sub(
+        r"^\s*\d+\s*[\.\)]?\s*",
+        "",
         value
     )
 
-    if matches:
-
-        name = matches[-1].strip()
-
-        # Avoid returning very short fragments
-        if len(name) >= 2:
-            return name
-
-    return value
+    return value.strip()
 
 
 # ============================================================
-# PARSE WEATHER TABLE
+# HEADER DETECTION
+# ============================================================
+
+def looks_like_header(row):
+    """
+    Determine whether a PDF table row is a header row.
+    """
+
+    row_text = " ".join(
+        clean_cell(cell).lower()
+        for cell in row
+        if cell is not None
+    )
+
+    header_keywords = [
+        "station",
+        "maximum temperature",
+        "minimum temperature",
+        "max temperature",
+        "min temperature",
+        "rainfall",
+        "district",
+        "weather",
+        "date",
+        "time",
+    ]
+
+    matches = sum(
+        keyword in row_text
+        for keyword in header_keywords
+    )
+
+    return matches >= 2
+
+
+# ============================================================
+# INVALID STATION NAME DETECTION
+# ============================================================
+
+def is_invalid_station_name(station):
+    """
+    Check whether a string is probably a title/header
+    rather than an actual weather station.
+    """
+
+    if not station:
+        return True
+
+    station_lower = station.lower()
+
+    invalid_keywords = [
+        "station",
+        "district",
+        "maximum",
+        "minimum",
+        "temperature",
+        "rainfall",
+        "weather report",
+        "department of meteorology",
+        "meteorological",
+        "daily rainfall",
+        "24 hour",
+        "time",
+        "date",
+        "slts",
+        "average",
+        "total",
+    ]
+
+    for keyword in invalid_keywords:
+
+        if keyword in station_lower:
+            return True
+
+    return False
+
+
+# ============================================================
+# PARSE MAIN WEATHER TABLE
 # ============================================================
 
 def parse_weather_report(pdf_bytes, report_date):
     """
-    Extract weather observations from the PDF.
+    Extract station-level meteorological observations.
 
-    The report contains:
+    Expected main table structure is approximately:
 
-    1. Meteorological Stations
-       - Maximum temperature
-       - Minimum temperature
-       - Daily rainfall
+        Station | Maximum Temperature | Minimum Temperature | Rainfall
 
-    2. Rainfall Stations
-       - Daily rainfall
-
-    3. Other Rainfall Stations
-       - Daily rainfall
-
-    All observations are converted into one tidy dataset.
+    The function also attempts to handle small variations
+    in table layout.
     """
+
+    print()
+    print("=" * 70)
+    print("STEP 4: Extracting weather observations")
+    print("=" * 70)
 
     records = []
 
     with pdfplumber.open(
-        io.BytesIO(pdf_bytes)
+        BytesIO(pdf_bytes)
     ) as pdf:
 
-        for page in pdf.pages:
+        print(
+            f"PDF contains {len(pdf.pages)} page(s)."
+        )
 
-            tables = page.extract_tables()
+        for page_number, page in enumerate(
+            pdf.pages,
+            start=1
+        ):
 
-            for table in tables:
+            print(
+                f"Processing page {page_number}..."
+            )
+
+            try:
+
+                tables = page.extract_tables()
+
+            except Exception as error:
+
+                print(
+                    f"Could not extract tables from "
+                    f"page {page_number}: {error}"
+                )
+
+                continue
+
+            for table_number, table in enumerate(
+                tables,
+                start=1
+            ):
 
                 if not table:
                     continue
 
                 for row in table:
 
-                    cleaned = [
+                    if not row:
+                        continue
+
+                    cleaned_row = [
                         clean_cell(cell)
                         for cell in row
                     ]
 
-                    if not any(cleaned):
+                    # Remove completely empty rows.
+                    if not any(cleaned_row):
                         continue
 
-                    row_text = " ".join(
-                        cleaned
-                    ).lower()
-
-                    # Ignore headers and report labels
-                    skip_phrases = [
-                        "meteorological stations",
-                        "rainfall stations",
-                        "hydro catchment areas",
-                        "other rainfall stations",
-                        "temperature in the shade",
-                        "daily rainfall",
-                        "highest rainfall",
-                        "weather report",
-                        "for the 24 hour period",
-                    ]
-
-                    if any(
-                        phrase in row_text
-                        for phrase in skip_phrases
+                    # Ignore header rows.
+                    if looks_like_header(
+                        cleaned_row
                     ):
                         continue
 
                     # ------------------------------------------------
-                    # Find numeric cells
-                    # ------------------------------------------------
-
-                    numeric_values = []
-
-                    for cell in cleaned:
-
-                        number = to_number(cell)
-
-                        if number is not None:
-                            numeric_values.append(number)
-
-                    # ------------------------------------------------
-                    # Main meteorological station rows
+                    # We are mainly interested in rows containing
+                    # at least 4 columns:
                     #
-                    # Station | Max | Min | Rainfall
+                    # Station
+                    # Max temperature
+                    # Min temperature
+                    # Rainfall
                     # ------------------------------------------------
 
-                    if len(numeric_values) >= 3:
-
-                        max_temp = numeric_values[-3]
-                        min_temp = numeric_values[-2]
-                        rainfall = numeric_values[-1]
-
-                        # Find first non-numeric cell
-                        station_cell = None
-
-                        for cell in cleaned:
-
-                            if (
-                                cell
-                                and to_number(cell)
-                                is None
-                            ):
-                                station_cell = cell
-                                break
-
-                        if station_cell:
-
-                            station = (
-                                extract_english_station_name(
-                                    station_cell
-                                )
-                            )
-
-                            if station:
-
-                                records.append(
-                                    {
-                                        "observation_date":
-                                            report_date,
-                                        "station":
-                                            station,
-                                        "max_temperature_c":
-                                            max_temp,
-                                        "min_temperature_c":
-                                            min_temp,
-                                        "rainfall_mm":
-                                            rainfall,
-                                        "station_type":
-                                            "Meteorological Station",
-                                    }
-                                )
-
+                    if len(cleaned_row) < 4:
                         continue
 
-                    # ------------------------------------------------
-                    # Rainfall station rows
-                    #
-                    # Some tables contain:
-                    #
-                    # Station A | Rainfall A |
-                    # Station B | Rainfall B
-                    # ------------------------------------------------
+                    station = clean_station_name(
+                        cleaned_row[0]
+                    )
 
-                    if len(numeric_values) == 2:
+                    if is_invalid_station_name(
+                        station
+                    ):
+                        continue
 
-                        text_cells = [
-                            cell
-                            for cell in cleaned
-                            if cell
-                            and to_number(cell)
-                            is None
-                        ]
+                    max_temp = to_number(
+                        cleaned_row[1]
+                    )
 
-                        if len(text_cells) >= 2:
+                    min_temp = to_number(
+                        cleaned_row[2]
+                    )
 
-                            station_1 = (
-                                extract_english_station_name(
-                                    text_cells[0]
-                                )
-                            )
+                    rainfall = to_number(
+                        cleaned_row[3]
+                    )
 
-                            station_2 = (
-                                extract_english_station_name(
-                                    text_cells[1]
-                                )
-                            )
+                    # A valid weather row should normally contain
+                    # at least one numeric meteorological value.
+                    numeric_values = [
+                        max_temp,
+                        min_temp,
+                        rainfall
+                    ]
 
-                            records.append(
-                                {
-                                    "observation_date":
-                                        report_date,
-                                    "station":
-                                        station_1,
-                                    "max_temperature_c":
-                                        None,
-                                    "min_temperature_c":
-                                        None,
-                                    "rainfall_mm":
-                                        numeric_values[0],
-                                    "station_type":
-                                        "Rainfall Station",
-                                }
-                            )
+                    if all(
+                        value is None
+                        for value in numeric_values
+                    ):
+                        continue
 
-                            records.append(
-                                {
-                                    "observation_date":
-                                        report_date,
-                                    "station":
-                                        station_2,
-                                    "max_temperature_c":
-                                        None,
-                                    "min_temperature_c":
-                                        None,
-                                    "rainfall_mm":
-                                        numeric_values[1],
-                                    "station_type":
-                                        "Rainfall Station",
-                                }
-                            )
+                    records.append(
+                        {
+                            "report_date": report_date,
+                            "station": station,
+                            "max_temp_c": max_temp,
+                            "min_temp_c": min_temp,
+                            "rainfall_mm": rainfall,
+                        }
+                    )
 
-    df = pd.DataFrame(records)
+    # ------------------------------------------------------------
+    # Remove duplicate station/date combinations.
+    # ------------------------------------------------------------
 
-    if df.empty:
+    if records:
 
-        raise RuntimeError(
-            "No weather observations were extracted "
-            "from the PDF."
+        df = pd.DataFrame(records)
+
+        df.drop_duplicates(
+            subset=[
+                "report_date",
+                "station"
+            ],
+            keep="first",
+            inplace=True
         )
 
-    # Remove duplicate station/date combinations
-    df = df.drop_duplicates(
-        subset=[
-            "observation_date",
-            "station"
-        ],
-        keep="first"
-    )
+    else:
 
-    # Sort dataset
-    df = df.sort_values(
-        [
-            "observation_date",
-            "station"
-        ]
+        df = pd.DataFrame(
+            columns=[
+                "report_date",
+                "station",
+                "max_temp_c",
+                "min_temp_c",
+                "rainfall_mm",
+            ]
+        )
+
+    print(
+        f"Extracted {len(df)} station observations."
     )
 
     return df
 
 
 # ============================================================
-# SAVE DATA
+# FALLBACK TEXT EXTRACTION
 # ============================================================
 
-def save_data(pdf_bytes, df, report_date):
+def fallback_text_extraction(
+    pdf_bytes,
+    report_date
+):
     """
-    Save:
-    1. Raw PDF
-    2. Daily tidy CSV
-    3. Master tidy CSV
+    Fallback parser for situations where pdfplumber's
+    table extraction does not work.
+
+    This reads the raw text line-by-line and attempts
+    to identify rows containing at least three numeric
+    weather observations.
     """
 
-    RAW_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    DAILY_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    # --------------------------------------------------------
-    # Save raw PDF
-    # --------------------------------------------------------
-
-    pdf_path = (
-        RAW_DIR /
-        f"weather_report_{report_date}.pdf"
-    )
-
-    pdf_path.write_bytes(
-        pdf_bytes
+    print()
+    print(
+        "Standard table extraction returned no records."
     )
 
     print(
-        f"Saved PDF: {pdf_path}"
+        "Trying fallback text extraction..."
     )
 
-    # --------------------------------------------------------
-    # Save daily CSV
-    # --------------------------------------------------------
+    records = []
 
-    daily_csv = (
-        DAILY_DIR /
-        f"weather_report_{report_date}.csv"
-    )
+    with pdfplumber.open(
+        BytesIO(pdf_bytes)
+    ) as pdf:
 
-    df.to_csv(
-        daily_csv,
-        index=False
-    )
+        for page_number, page in enumerate(
+            pdf.pages,
+            start=1
+        ):
 
-    print(
-        f"Saved daily dataset: {daily_csv}"
-    )
+            text = page.extract_text()
 
-    # --------------------------------------------------------
-    # Update master tidy dataset
-    # --------------------------------------------------------
+            if not text:
+                continue
 
-    master_csv = (
-        DATA_DIR /
-        "weather_tidy.csv"
-    )
+            for line in text.splitlines():
 
-    if master_csv.exists():
+                line = clean_cell(line)
 
-        existing = pd.read_csv(
-            master_csv
-        )
+                if not line:
+                    continue
 
-        combined = pd.concat(
-            [
-                existing,
-                df
+                # Ignore obvious headings.
+                if looks_like_header([line]):
+                    continue
+
+                # Find numeric values.
+                numbers = re.findall(
+                    r"-?\d+(?:\.\d+)?",
+                    line
+                )
+
+                # We need at least three numeric values
+                # for max temperature, min temperature
+                # and rainfall.
+                if len(numbers) < 3:
+                    continue
+
+                parts = line.split()
+
+                if len(parts) < 4:
+                    continue
+
+                # Try to identify the numeric portion.
+                numeric_positions = []
+
+                for index, part in enumerate(parts):
+
+                    if re.fullmatch(
+                        r"-?\d+(?:\.\d+)?",
+                        part
+                    ):
+
+                        numeric_positions.append(index)
+
+                if len(numeric_positions) < 3:
+                    continue
+
+                first_numeric_index = (
+                    numeric_positions[0]
+                )
+
+                station_parts = parts[
+                    :first_numeric_index
+                ]
+
+                station = clean_station_name(
+                    " ".join(station_parts)
+                )
+
+                if is_invalid_station_name(
+                    station
+                ):
+                    continue
+
+                try:
+
+                    max_temp = float(
+                        parts[
+                            numeric_positions[0]
+                        ]
+                    )
+
+                    min_temp = float(
+                        parts[
+                            numeric_positions[1]
+                        ]
+                    )
+
+                    rainfall = float(
+                        parts[
+                            numeric_positions[2]
+                        ]
+                    )
+
+                except (ValueError, IndexError):
+
+                    continue
+
+                records.append(
+                    {
+                        "report_date": report_date,
+                        "station": station,
+                        "max_temp_c": max_temp,
+                        "min_temp_c": min_temp,
+                        "rainfall_mm": rainfall,
+                    }
+                )
+
+    if records:
+
+        df = pd.DataFrame(records)
+
+        df.drop_duplicates(
+            subset=[
+                "report_date",
+                "station"
             ],
-            ignore_index=True
+            keep="first",
+            inplace=True
         )
 
-    else:
+        print(
+            f"Fallback extraction found "
+            f"{len(df)} observations."
+        )
 
-        combined = df
+        return df
 
-    combined = combined.drop_duplicates(
-        subset=[
-            "observation_date",
-            "station"
-        ],
-        keep="last"
+    print(
+        "Fallback text extraction also found no records."
     )
 
-    combined = combined.sort_values(
-        [
-            "observation_date",
-            "station"
+    return pd.DataFrame(
+        columns=[
+            "report_date",
+            "station",
+            "max_temp_c",
+            "min_temp_c",
+            "rainfall_mm",
         ]
     )
 
-    combined.to_csv(
-        master_csv,
+
+# ============================================================
+# SAVE RAW PDF
+# ============================================================
+
+def save_raw_pdf(
+    pdf_bytes,
+    report_date
+):
+    """
+    Save the original PDF for reproducibility/audit purposes.
+    """
+
+    filename = (
+        f"weather_report_{report_date}.pdf"
+    )
+
+    filepath = os.path.join(
+        RAW_DIR,
+        filename
+    )
+
+    with open(
+        filepath,
+        "wb"
+    ) as file:
+
+        file.write(pdf_bytes)
+
+    print(
+        f"Raw PDF saved: {filepath}"
+    )
+
+    return filepath
+
+
+# ============================================================
+# SAVE DAILY CSV
+# ============================================================
+
+def save_daily_csv(
+    df,
+    report_date
+):
+    """
+    Save one tidy CSV file for the report date.
+    """
+
+    filename = (
+        f"weather_report_{report_date}.csv"
+    )
+
+    filepath = os.path.join(
+        DAILY_DIR,
+        filename
+    )
+
+    df.to_csv(
+        filepath,
         index=False
     )
 
     print(
-        f"Updated master dataset: {master_csv}"
+        f"Daily CSV saved: {filepath}"
     )
+
+    return filepath
 
 
 # ============================================================
-# REMOVE FILES OLDER THAN 90 DAYS
+# UPDATE MASTER TIDY DATASET
+# ============================================================
+
+def update_master_dataset(df):
+    """
+    Add the latest observations to the master tidy dataset.
+
+    If the same report date and station already exist,
+    the newer observation replaces the older one.
+    """
+
+    print()
+    print("=" * 70)
+    print("STEP 5: Updating master tidy dataset")
+    print("=" * 70)
+
+    if df.empty:
+
+        raise RuntimeError(
+            "No observations were extracted. "
+            "Master dataset will not be modified."
+        )
+
+    if os.path.exists(
+        MASTER_FILE
+    ):
+
+        try:
+
+            existing_df = pd.read_csv(
+                MASTER_FILE
+            )
+
+            print(
+                f"Existing master dataset contains "
+                f"{len(existing_df)} rows."
+            )
+
+        except Exception as error:
+
+            print(
+                f"Could not read existing master dataset: "
+                f"{error}"
+            )
+
+            existing_df = pd.DataFrame()
+
+    else:
+
+        existing_df = pd.DataFrame()
+
+    # Combine old and new observations.
+    combined_df = pd.concat(
+        [
+            existing_df,
+            df
+        ],
+        ignore_index=True
+    )
+
+    # Remove duplicate observations.
+    #
+    # Keep the LAST record so that if today's workflow
+    # runs more than once, the latest extraction is used.
+    combined_df.drop_duplicates(
+        subset=[
+            "report_date",
+            "station"
+        ],
+        keep="last",
+        inplace=True
+    )
+
+    # Sort chronologically.
+    combined_df.sort_values(
+        by=[
+            "report_date",
+            "station"
+        ],
+        inplace=True
+    )
+
+    # Reset index.
+    combined_df.reset_index(
+        drop=True,
+        inplace=True
+    )
+
+    # Save master dataset.
+    combined_df.to_csv(
+        MASTER_FILE,
+        index=False
+    )
+
+    print(
+        f"Master tidy dataset updated: {MASTER_FILE}"
+    )
+
+    print(
+        f"Total observations in master dataset: "
+        f"{len(combined_df)}"
+    )
+
+    return combined_df
+
+
+# ============================================================
+# CLEAN OLD FILES
 # ============================================================
 
 def cleanup_old_files():
     """
-    Remove daily CSV and PDF files older than 90 days.
+    Remove raw PDFs and daily CSV files older than 90 days.
+
+    The master weather_tidy.csv is NOT deleted.
     """
 
-    cutoff_time = (
-        time.time()
-        - RETENTION_DAYS * 24 * 60 * 60
+    print()
+    print("=" * 70)
+    print("STEP 6: Cleaning files older than 90 days")
+    print("=" * 70)
+
+    cutoff_seconds = (
+        RETENTION_DAYS * 24 * 60 * 60
     )
 
-    for directory in [
+    current_time = time.time()
+
+    removed_count = 0
+
+    directories = [
         RAW_DIR,
         DAILY_DIR
-    ]:
+    ]
 
-        if not directory.exists():
+    for directory in directories:
+
+        if not os.path.exists(directory):
             continue
 
-        for file_path in directory.iterdir():
+        for filename in os.listdir(directory):
 
-            if not file_path.is_file():
+            filepath = os.path.join(
+                directory,
+                filename
+            )
+
+            if not os.path.isfile(filepath):
                 continue
 
-            if file_path.stat().st_mtime < cutoff_time:
+            try:
 
-                file_path.unlink()
+                modified_time = os.path.getmtime(
+                    filepath
+                )
+
+                age_seconds = (
+                    current_time - modified_time
+                )
+
+                if age_seconds > cutoff_seconds:
+
+                    os.remove(filepath)
+
+                    removed_count += 1
+
+                    print(
+                        f"Removed old file: {filepath}"
+                    )
+
+            except OSError as error:
 
                 print(
-                    f"Removed old file: {file_path}"
+                    f"Could not remove {filepath}: "
+                    f"{error}"
                 )
+
+    if removed_count == 0:
+
+        print(
+            "No files older than 90 days were found."
+        )
+
+    else:
+
+        print(
+            f"Removed {removed_count} old file(s)."
+        )
 
 
 # ============================================================
@@ -736,55 +1178,150 @@ def cleanup_old_files():
 # ============================================================
 
 def main():
+    """
+    Main weather data extraction pipeline.
+    """
+
+    print()
+    print("=" * 70)
+    print("SRI LANKA 24-HOUR WEATHER DATA EXTRACTION")
+    print("=" * 70)
 
     print(
-        "=========================================="
+        "Starting weather data extraction..."
     )
 
-    print(
-        "Sri Lanka 24-Hour Weather Data Pipeline"
-    )
+    # --------------------------------------------------------
+    # 1. Create directories
+    # --------------------------------------------------------
 
-    print(
-        "=========================================="
-    )
+    create_directories()
 
-    # 1. Download report
+    # --------------------------------------------------------
+    # 2. Download latest PDF
+    # --------------------------------------------------------
+
     pdf_bytes = download_report()
 
-    # 2. Read actual report date
+    # --------------------------------------------------------
+    # 3. Extract actual report date
+    # --------------------------------------------------------
+
     report_date = extract_report_date(
         pdf_bytes
     )
 
-    print(
-        f"Report date: {report_date}"
+    # --------------------------------------------------------
+    # 4. Save raw PDF
+    # --------------------------------------------------------
+
+    save_raw_pdf(
+        pdf_bytes,
+        report_date
     )
 
-    # 3. Extract observations
+    # --------------------------------------------------------
+    # 5. Extract weather data
+    # --------------------------------------------------------
+
     df = parse_weather_report(
         pdf_bytes,
         report_date
     )
 
-    print(
-        f"Extracted {len(df)} observations."
-    )
+    # --------------------------------------------------------
+    # 6. If standard extraction fails, use fallback parser
+    # --------------------------------------------------------
 
-    # 4. Save PDF + daily CSV + master dataset
-    save_data(
-        pdf_bytes,
+    if df.empty:
+
+        df = fallback_text_extraction(
+            pdf_bytes,
+            report_date
+        )
+
+    # --------------------------------------------------------
+    # 7. Do not continue if no data was extracted.
+    # --------------------------------------------------------
+
+    if df.empty:
+
+        raise RuntimeError(
+            "No weather observations could be extracted "
+            "from the PDF. The dataset was NOT updated."
+        )
+
+    # --------------------------------------------------------
+    # 8. Ensure correct column order
+    # --------------------------------------------------------
+
+    expected_columns = [
+        "report_date",
+        "station",
+        "max_temp_c",
+        "min_temp_c",
+        "rainfall_mm",
+    ]
+
+    df = df[
+        expected_columns
+    ]
+
+    # --------------------------------------------------------
+    # 9. Save daily CSV
+    # --------------------------------------------------------
+
+    save_daily_csv(
         df,
         report_date
     )
 
-    # 5. Remove files older than 90 days
-    cleanup_old_files()
+    # --------------------------------------------------------
+    # 10. Update master tidy dataset
+    # --------------------------------------------------------
 
-    print(
-        "Weather data pipeline completed successfully."
+    update_master_dataset(
+        df
     )
 
+    # --------------------------------------------------------
+    # 11. Remove files older than 90 days
+    # --------------------------------------------------------
+
+    cleanup_old_files()
+
+    # --------------------------------------------------------
+    # 12. Display summary
+    # --------------------------------------------------------
+
+    print()
+    print("=" * 70)
+    print("EXTRACTION COMPLETED SUCCESSFULLY")
+    print("=" * 70)
+
+    print(
+        f"Report date : {report_date}"
+    )
+
+    print(
+        f"Stations extracted : {len(df)}"
+    )
+
+    print(
+        f"Daily file : "
+        f"{DAILY_DIR}/weather_report_{report_date}.csv"
+    )
+
+    print(
+        f"Master dataset : {MASTER_FILE}"
+    )
+
+    print("=" * 70)
+
+
+# ============================================================
+# PROGRAM ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
     main()
