@@ -14,8 +14,8 @@ from bs4 import BeautifulSoup
 # CONFIGURATION
 # ============================================================
 
-BASE_URL = "https://meteo.gov.lk"
-PDF_URL = "https://meteo.gov.lk/pdfs/twentyfour_pdf.pdf"
+BASE_URL = "http://meteo.gov.lk"
+PDF_URL = "http://meteo.gov.lk/pdfs/twentyfour_pdf.pdf"
 
 DATA_DIR = "data"
 RAW_DIR = os.path.join(DATA_DIR, "raw")
