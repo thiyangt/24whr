@@ -1,142 +1,618 @@
-import os
+import io
+import re
 import time
-import glob
-from datetime import datetime
-import requests
-from bs4 import BeautifulSoup
+from pathlib import Path
+
 import pandas as pd
 import pdfplumber
-import io
+import requests
 
-def fetch_and_save_weather():
-    base_url = "https://meteo.gov.lk"
-    pdf_url = "https://meteo.gov.lk/pdfs/twentyfour_pdf.pdf"
-    
-    # Add User-Agent header to prevent firewall/bot blocks from the server
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    
-    print(f"Downloading 24-hour weather report from: {pdf_url}")
-    pdf_res = None
-    
-    try:
-        # Added a 20-second timeout to handle slow connection pools safely
-        pdf_res = requests.get(pdf_url, headers=headers, timeout=20)
-        pdf_res.raise_for_status()
-    except Exception as e:
-        print(f"Direct PDF fetch failed ({e}). Trying fallback website scrape...")
-        try:
-            response = requests.get(base_url, headers=headers, timeout=20)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'html.parser')
-            report_anchor = soup.find('a', string=lambda text: text and '24 Hour Weather Report' in text)
-            if report_anchor and report_anchor.get('href'):
-                pdf_url = report_anchor['href']
-                if not pdf_url.startswith('http'):
-                    pdf_url = base_url + ('/' if not pdf_url.startswith('/') else '') + pdf_url
-                pdf_res = requests.get(pdf_url, headers=headers, timeout=20)
-                pdf_res.raise_for_status()
-            else:
-                raise ValueError("Could not locate the 24-Hour Weather Report PDF link.")
-        except Exception as inner_e:
-            print(f"Fallback connection also failed: {inner_e}. Creating safe fallback CSV to prevent failure.")
-            create_fallback_csv()
-            return
 
-    os.makedirs("data", exist_ok=True)
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    output_csv = f"data/weather_report_{date_str}.csv"
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
-    all_stations_data = []
+BASE_URL = "https://meteo.gov.lk"
+PDF_URL = f"{BASE_URL}/pdfs/twentyfour_pdf.pdf"
 
-    try:
-        # Extract all tables and rows across pages of the PDF report
-        with pdfplumber.open(io.BytesIO(pdf_res.content)) as pdf:
-            for page in pdf.pages:
-                tables = page.extract_tables()
-                for table in tables:
-                    for row in table:
-                        # Clean up cells
-                        cleaned_row = [str(cell).strip().replace('\n', ' ') if cell else '' for cell in row]
-                        if any(cleaned_row):
-                            all_stations_data.append(cleaned_row)
-    except Exception as pdf_err:
-        print(f"Error reading PDF content: {pdf_err}")
+DATA_DIR = Path("data")
+RAW_DIR = DATA_DIR / "raw"
+DAILY_DIR = DATA_DIR / "daily"
+
+RETENTION_DAYS = 90
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
+}
+
+
+# ============================================================
+# DOWNLOAD WEATHER REPORT
+# ============================================================
+
+def download_report():
+    """
+    Download the latest 24-hour weather report PDF.
+    """
+
+    print(f"Downloading report from: {PDF_URL}")
+
+    response = requests.get(
+        PDF_URL,
+        headers=HEADERS,
+        timeout=30
+    )
+
+    response.raise_for_status()
+
+    # Check that the response is actually a PDF
+    content_type = response.headers.get(
+        "Content-Type",
+        ""
+    ).lower()
+
+    if "pdf" not in content_type:
+        print(
+            f"Warning: unexpected Content-Type: {content_type}"
+        )
+
+    return response.content
+
+
+# ============================================================
+# EXTRACT REPORT DATE
+# ============================================================
+
+def extract_report_date(pdf_bytes):
+    """
+    Extract the report date from the PDF text.
+
+    The report uses a date such as:
+    2026.10.28
+    """
+
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+
+        full_text = ""
+
+        for page in pdf.pages:
+            text = page.extract_text() or ""
+            full_text += "\n" + text
+
+    # Look for YYYY.MM.DD
+    match = re.search(
+        r"(20\d{2})[./-](\d{1,2})[./-](\d{1,2})",
+        full_text
+    )
+
+    if not match:
+        raise ValueError(
+            "Could not find the report date inside the PDF."
+        )
+
+    year, month, day = match.groups()
+
+    report_date = (
+        f"{int(year):04d}-"
+        f"{int(month):02d}-"
+        f"{int(day):02d}"
+    )
+
+    return report_date
+
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
+def clean_cell(value):
+    """
+    Clean a PDF table cell.
+    """
+
+    if value is None:
+        return ""
+
+    return (
+        str(value)
+        .replace("\n", " ")
+        .strip()
+    )
+
+
+def to_number(value):
+    """
+    Convert a PDF cell to a number.
+
+    'Trace' rainfall is represented as 0.001.
+    """
+
+    if value is None:
+        return None
+
+    value = str(value).strip()
+
+    if not value:
+        return None
+
+    if value.lower() == "trace":
+        return 0.001
+
+    match = re.search(
+        r"-?\d+(?:\.\d+)?",
+        value
+    )
+
+    if match:
+        return float(match.group())
+
+    return None
+
+
+def extract_english_station_name(value):
+    """
+    Extract the English station name from the
+    multilingual station cell.
+    """
+
+    value = clean_cell(value)
+
+    # English station name normally appears at the
+    # end of the multilingual station cell.
+    matches = re.findall(
+        r"[A-Za-z][A-Za-z\s().'\-/]*$",
+        value
+    )
+
+    if matches:
+
+        name = matches[-1].strip()
+
+        # Avoid returning very short fragments
+        if len(name) >= 2:
+            return name
+
+    return value
+
+
+# ============================================================
+# PARSE WEATHER TABLE
+# ============================================================
+
+def parse_weather_report(pdf_bytes, report_date):
+    """
+    Extract weather observations from the PDF.
+
+    The report contains:
+
+    1. Meteorological Stations
+       - Maximum temperature
+       - Minimum temperature
+       - Daily rainfall
+
+    2. Rainfall Stations
+       - Daily rainfall
+
+    3. Other Rainfall Stations
+       - Daily rainfall
+
+    All observations are converted into one tidy dataset.
+    """
 
     records = []
-    for row in all_stations_data:
-        # Filter rows that look like station data entries (must have text and numbers)
-        row_text = " ".join([val for val in row if val])
-        if len(row) >= 2 and any(char.isdigit() for char in row_text):
-            station_name = str(row[0]).strip()
-            
-            # Skip title or header rows
-            skip_keywords = ["station", "district", "department", "meteorology", "table", "slts"]
-            if any(kw in station_name.lower() for kw in skip_keywords) or not station_name:
-                continue
 
-            records.append({
-                "date": date_str,
-                "station": station_name,
-                "rainfall_mm": row[1] if len(row) > 1 else "",
-                "max_temp_c": row[2] if len(row) > 2 else "",
-                "min_temp_c": row[3] if len(row) > 3 else "",
-                "relative_humidity_pct": row[4] if len(row) > 4 else ""
-            })
+    with pdfplumber.open(
+        io.BytesIO(pdf_bytes)
+    ) as pdf:
 
-    # Fallback if table extraction structure varies
-    if not records and pdf_res:
-        print("Warning: Standard table layout not found, extracting raw text lines as fallback.")
-        try:
-            with pdfplumber.open(io.BytesIO(pdf_res.content)) as pdf:
-                for page in pdf.pages:
-                    text = page.extract_text()
-                    if text:
-                        for line in text.split('\n'):
-                            if any(char.isdigit() for char in line):
-                                parts = line.split()
-                                if len(parts) >= 2:
-                                    records.append({
-                                        "date": date_str,
-                                        "station": parts[0],
-                                        "rainfall_mm": parts[1] if len(parts) > 1 else "",
-                                        "max_temp_c": parts[2] if len(parts) > 2 else "",
-                                        "min_temp_c": parts[3] if len(parts) > 3 else "",
-                                        "relative_humidity_pct": parts[4] if len(parts) > 4 else ""
-                                    })
-        except Exception as fallback_err:
-            print(f"Fallback text extraction failed: {fallback_err}")
+        for page in pdf.pages:
+
+            tables = page.extract_tables()
+
+            for table in tables:
+
+                if not table:
+                    continue
+
+                for row in table:
+
+                    cleaned = [
+                        clean_cell(cell)
+                        for cell in row
+                    ]
+
+                    if not any(cleaned):
+                        continue
+
+                    row_text = " ".join(
+                        cleaned
+                    ).lower()
+
+                    # Ignore headers and report labels
+                    skip_phrases = [
+                        "meteorological stations",
+                        "rainfall stations",
+                        "hydro catchment areas",
+                        "other rainfall stations",
+                        "temperature in the shade",
+                        "daily rainfall",
+                        "highest rainfall",
+                        "weather report",
+                        "for the 24 hour period",
+                    ]
+
+                    if any(
+                        phrase in row_text
+                        for phrase in skip_phrases
+                    ):
+                        continue
+
+                    # ------------------------------------------------
+                    # Find numeric cells
+                    # ------------------------------------------------
+
+                    numeric_values = []
+
+                    for cell in cleaned:
+
+                        number = to_number(cell)
+
+                        if number is not None:
+                            numeric_values.append(number)
+
+                    # ------------------------------------------------
+                    # Main meteorological station rows
+                    #
+                    # Station | Max | Min | Rainfall
+                    # ------------------------------------------------
+
+                    if len(numeric_values) >= 3:
+
+                        max_temp = numeric_values[-3]
+                        min_temp = numeric_values[-2]
+                        rainfall = numeric_values[-1]
+
+                        # Find first non-numeric cell
+                        station_cell = None
+
+                        for cell in cleaned:
+
+                            if (
+                                cell
+                                and to_number(cell)
+                                is None
+                            ):
+                                station_cell = cell
+                                break
+
+                        if station_cell:
+
+                            station = (
+                                extract_english_station_name(
+                                    station_cell
+                                )
+                            )
+
+                            if station:
+
+                                records.append(
+                                    {
+                                        "observation_date":
+                                            report_date,
+                                        "station":
+                                            station,
+                                        "max_temperature_c":
+                                            max_temp,
+                                        "min_temperature_c":
+                                            min_temp,
+                                        "rainfall_mm":
+                                            rainfall,
+                                        "station_type":
+                                            "Meteorological Station",
+                                    }
+                                )
+
+                        continue
+
+                    # ------------------------------------------------
+                    # Rainfall station rows
+                    #
+                    # Some tables contain:
+                    #
+                    # Station A | Rainfall A |
+                    # Station B | Rainfall B
+                    # ------------------------------------------------
+
+                    if len(numeric_values) == 2:
+
+                        text_cells = [
+                            cell
+                            for cell in cleaned
+                            if cell
+                            and to_number(cell)
+                            is None
+                        ]
+
+                        if len(text_cells) >= 2:
+
+                            station_1 = (
+                                extract_english_station_name(
+                                    text_cells[0]
+                                )
+                            )
+
+                            station_2 = (
+                                extract_english_station_name(
+                                    text_cells[1]
+                                )
+                            )
+
+                            records.append(
+                                {
+                                    "observation_date":
+                                        report_date,
+                                    "station":
+                                        station_1,
+                                    "max_temperature_c":
+                                        None,
+                                    "min_temperature_c":
+                                        None,
+                                    "rainfall_mm":
+                                        numeric_values[0],
+                                    "station_type":
+                                        "Rainfall Station",
+                                }
+                            )
+
+                            records.append(
+                                {
+                                    "observation_date":
+                                        report_date,
+                                    "station":
+                                        station_2,
+                                    "max_temperature_c":
+                                        None,
+                                    "min_temperature_c":
+                                        None,
+                                    "rainfall_mm":
+                                        numeric_values[1],
+                                    "station_type":
+                                        "Rainfall Station",
+                                }
+                            )
 
     df = pd.DataFrame(records)
-    # Remove duplicate station rows if captured multiple times
-    if not df.empty and "station" in df.columns:
-        df.drop_duplicates(subset=["station"], keep="first", inplace=True)
-    
-    df.to_csv(output_csv, index=False)
-    print(f"Successfully compiled tidy dataset with {len(df)} stations: {output_csv}")
 
-def create_fallback_csv():
-    os.makedirs("data", exist_ok=True)
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    output_csv = f"data/weather_report_{date_str}.csv"
-    df_empty = pd.DataFrame(columns=["date", "station", "rainfall_mm", "max_temp_c", "min_temp_c", "relative_humidity_pct"])
-    df_empty.to_csv(output_csv, index=False)
-    print("Created empty fallback CSV file due to network restriction.")
+    if df.empty:
+
+        raise RuntimeError(
+            "No weather observations were extracted "
+            "from the PDF."
+        )
+
+    # Remove duplicate station/date combinations
+    df = df.drop_duplicates(
+        subset=[
+            "observation_date",
+            "station"
+        ],
+        keep="first"
+    )
+
+    # Sort dataset
+    df = df.sort_values(
+        [
+            "observation_date",
+            "station"
+        ]
+    )
+
+    return df
+
+
+# ============================================================
+# SAVE DATA
+# ============================================================
+
+def save_data(pdf_bytes, df, report_date):
+    """
+    Save:
+    1. Raw PDF
+    2. Daily tidy CSV
+    3. Master tidy CSV
+    """
+
+    RAW_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    DAILY_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    # --------------------------------------------------------
+    # Save raw PDF
+    # --------------------------------------------------------
+
+    pdf_path = (
+        RAW_DIR /
+        f"weather_report_{report_date}.pdf"
+    )
+
+    pdf_path.write_bytes(
+        pdf_bytes
+    )
+
+    print(
+        f"Saved PDF: {pdf_path}"
+    )
+
+    # --------------------------------------------------------
+    # Save daily CSV
+    # --------------------------------------------------------
+
+    daily_csv = (
+        DAILY_DIR /
+        f"weather_report_{report_date}.csv"
+    )
+
+    df.to_csv(
+        daily_csv,
+        index=False
+    )
+
+    print(
+        f"Saved daily dataset: {daily_csv}"
+    )
+
+    # --------------------------------------------------------
+    # Update master tidy dataset
+    # --------------------------------------------------------
+
+    master_csv = (
+        DATA_DIR /
+        "weather_tidy.csv"
+    )
+
+    if master_csv.exists():
+
+        existing = pd.read_csv(
+            master_csv
+        )
+
+        combined = pd.concat(
+            [
+                existing,
+                df
+            ],
+            ignore_index=True
+        )
+
+    else:
+
+        combined = df
+
+    combined = combined.drop_duplicates(
+        subset=[
+            "observation_date",
+            "station"
+        ],
+        keep="last"
+    )
+
+    combined = combined.sort_values(
+        [
+            "observation_date",
+            "station"
+        ]
+    )
+
+    combined.to_csv(
+        master_csv,
+        index=False
+    )
+
+    print(
+        f"Updated master dataset: {master_csv}"
+    )
+
+
+# ============================================================
+# REMOVE FILES OLDER THAN 90 DAYS
+# ============================================================
 
 def cleanup_old_files():
-    data_dir = "data"
-    now = time.time()
-    cutoff_seconds = 90 * 86400  # 90 days
-    
-    if os.path.exists(data_dir):
-        for file_path in glob.glob(f"{data_dir}/*.csv"):
-            if (now - os.path.getmtime(file_path)) > cutoff_seconds:
-                os.remove(file_path)
-                print(f"Removed old report: {file_path}")
+    """
+    Remove daily CSV and PDF files older than 90 days.
+    """
+
+    cutoff_time = (
+        time.time()
+        - RETENTION_DAYS * 24 * 60 * 60
+    )
+
+    for directory in [
+        RAW_DIR,
+        DAILY_DIR
+    ]:
+
+        if not directory.exists():
+            continue
+
+        for file_path in directory.iterdir():
+
+            if not file_path.is_file():
+                continue
+
+            if file_path.stat().st_mtime < cutoff_time:
+
+                file_path.unlink()
+
+                print(
+                    f"Removed old file: {file_path}"
+                )
+
+
+# ============================================================
+# MAIN PIPELINE
+# ============================================================
+
+def main():
+
+    print(
+        "=========================================="
+    )
+
+    print(
+        "Sri Lanka 24-Hour Weather Data Pipeline"
+    )
+
+    print(
+        "=========================================="
+    )
+
+    # 1. Download report
+    pdf_bytes = download_report()
+
+    # 2. Read actual report date
+    report_date = extract_report_date(
+        pdf_bytes
+    )
+
+    print(
+        f"Report date: {report_date}"
+    )
+
+    # 3. Extract observations
+    df = parse_weather_report(
+        pdf_bytes,
+        report_date
+    )
+
+    print(
+        f"Extracted {len(df)} observations."
+    )
+
+    # 4. Save PDF + daily CSV + master dataset
+    save_data(
+        pdf_bytes,
+        df,
+        report_date
+    )
+
+    # 5. Remove files older than 90 days
+    cleanup_old_files()
+
+    print(
+        "Weather data pipeline completed successfully."
+    )
+
 
 if __name__ == "__main__":
-    print("Starting multi-station weather extraction...")
-    fetch_and_save_weather()
-    cleanup_old_files()
-    print("Process completed successfully.")
+    main()
