@@ -10,9 +10,6 @@ import pdfplumber
 from bs4 import BeautifulSoup
 
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
 
 BASE_URL = "http://meteo.gov.lk"
 PDF_URL = "http://meteo.gov.lk/pdfs/twentyfour_pdf.pdf"
@@ -26,8 +23,7 @@ MASTER_FILE = os.path.join(DATA_DIR, "weather_tidy.csv")
 RETENTION_DAYS = 90
 
 
-# Browser-like headers help reduce the chance of simple
-# bot/firewall blocking.
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -42,7 +38,7 @@ HEADERS = {
 }
 
 
-# ============================================================
+
 # DIRECTORY SETUP
 # ============================================================
 
@@ -58,7 +54,7 @@ def create_directories():
     print("Data directories are ready.")
 
 
-# ============================================================
+
 # DOWNLOAD WEATHER REPORT
 # ============================================================
 
@@ -79,7 +75,7 @@ def download_report():
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    # --------------------------------------------------------
+   
     # Attempt 1: Direct PDF URL
     # --------------------------------------------------------
 
@@ -102,14 +98,13 @@ def download_report():
 
             response.raise_for_status()
 
-            # Basic validation to make sure the response
-            # actually contains something resembling a PDF.
+
             if len(response.content) < 1000:
                 raise RuntimeError(
                     "Downloaded response is too small to be a valid PDF."
                 )
 
-            # Check PDF signature when available.
+
             if not response.content.startswith(b"%PDF"):
                 print(
                     "Warning: response does not start with the "
@@ -155,7 +150,7 @@ def download_report():
 
                 time.sleep(wait_seconds)
 
-    # --------------------------------------------------------
+    
     # Attempt 2: Official website fallback
     # --------------------------------------------------------
 
@@ -184,7 +179,7 @@ def download_report():
 
         report_url = None
 
-        # ----------------------------------------------------
+        
         # Search for a link whose text contains
         # "24 hour weather report"
         # ----------------------------------------------------
@@ -209,7 +204,7 @@ def download_report():
 
                 break
 
-        # ----------------------------------------------------
+     
         # If not found, search for the known PDF filename.
         # ----------------------------------------------------
 
@@ -230,7 +225,7 @@ def download_report():
 
                     break
 
-        # ----------------------------------------------------
+
         # Stop if no report link was found.
         # ----------------------------------------------------
 
@@ -283,26 +278,11 @@ def download_report():
         ) from error
 
 
-# ============================================================
 # EXTRACT REPORT DATE
 # ============================================================
 
 def extract_report_date(pdf_bytes):
-    """
-    Extract the actual report date from the PDF.
 
-    The Department of Meteorology report commonly contains
-    dates in formats such as:
-
-        2026.10.28
-        2026.10.27
-
-    Returns:
-        str: Date in YYYY-MM-DD format.
-
-    Raises:
-        ValueError: If a report date cannot be found.
-    """
 
     print()
     print("=" * 70)
@@ -360,7 +340,7 @@ def extract_report_date(pdf_bytes):
             "Could not find a valid report date in the PDF."
         )
 
-    # Usually the first relevant date is the report date.
+   
     report_date = min(all_dates)
 
     date_string = report_date.strftime(
@@ -374,7 +354,6 @@ def extract_report_date(pdf_bytes):
     return date_string
 
 
-# ============================================================
 # CELL CLEANING
 # ============================================================
 
@@ -401,23 +380,12 @@ def clean_cell(value):
     return value.strip()
 
 
-# ============================================================
+
 # NUMERIC CONVERSION
 # ============================================================
 
 def to_number(value):
-    """
-    Convert a PDF cell into a numeric value.
-
-    Examples:
-        '31.2' -> 31.2
-        '31.2 C' -> 31.2
-        '-' -> None
-        'T' -> 0.0
-
-    Returns:
-        float or None
-    """
+    
 
     if value is None:
         return None
@@ -429,8 +397,7 @@ def to_number(value):
 
     value_upper = value.upper()
 
-    # Trace rainfall is conventionally treated as zero
-    # for the numeric tidy dataset.
+
     if value_upper in {
         "T",
         "TRACE"
@@ -463,7 +430,7 @@ def to_number(value):
         return None
 
 
-# ============================================================
+
 # STATION NAME CLEANING
 # ============================================================
 
@@ -478,9 +445,6 @@ def clean_station_name(value):
         return ""
 
     # Remove leading numbering such as:
-    # 1. Colombo
-    # 01 Colombo
-    # 1 Colombo
     value = re.sub(
         r"^\s*\d+\s*[\.\)]?\s*",
         "",
@@ -490,7 +454,6 @@ def clean_station_name(value):
     return value.strip()
 
 
-# ============================================================
 # HEADER DETECTION
 # ============================================================
 
@@ -526,15 +489,11 @@ def looks_like_header(row):
     return matches >= 2
 
 
-# ============================================================
 # INVALID STATION NAME DETECTION
 # ============================================================
 
 def is_invalid_station_name(station):
-    """
-    Check whether a string is probably a title/header
-    rather than an actual weather station.
-    """
+
 
     if not station:
         return True
@@ -568,21 +527,10 @@ def is_invalid_station_name(station):
     return False
 
 
-# ============================================================
 # PARSE MAIN WEATHER TABLE
 # ============================================================
 
 def parse_weather_report(pdf_bytes, report_date):
-    """
-    Extract station-level meteorological observations.
-
-    Expected main table structure is approximately:
-
-        Station | Maximum Temperature | Minimum Temperature | Rainfall
-
-    The function also attempts to handle small variations
-    in table layout.
-    """
 
     print()
     print("=" * 70)
@@ -643,21 +591,12 @@ def parse_weather_report(pdf_bytes, report_date):
                     if not any(cleaned_row):
                         continue
 
-                    # Ignore header rows.
+                 
                     if looks_like_header(
                         cleaned_row
                     ):
                         continue
 
-                    # ------------------------------------------------
-                    # We are mainly interested in rows containing
-                    # at least 4 columns:
-                    #
-                    # Station
-                    # Max temperature
-                    # Min temperature
-                    # Rainfall
-                    # ------------------------------------------------
 
                     if len(cleaned_row) < 4:
                         continue
@@ -683,8 +622,7 @@ def parse_weather_report(pdf_bytes, report_date):
                         cleaned_row[3]
                     )
 
-                    # A valid weather row should normally contain
-                    # at least one numeric meteorological value.
+
                     numeric_values = [
                         max_temp,
                         min_temp,
@@ -707,7 +645,6 @@ def parse_weather_report(pdf_bytes, report_date):
                         }
                     )
 
-    # ------------------------------------------------------------
     # Remove duplicate station/date combinations.
     # ------------------------------------------------------------
 
@@ -743,7 +680,7 @@ def parse_weather_report(pdf_bytes, report_date):
     return df
 
 
-# ============================================================
+
 # FALLBACK TEXT EXTRACTION
 # ============================================================
 
@@ -751,14 +688,6 @@ def fallback_text_extraction(
     pdf_bytes,
     report_date
 ):
-    """
-    Fallback parser for situations where pdfplumber's
-    table extraction does not work.
-
-    This reads the raw text line-by-line and attempts
-    to identify rows containing at least three numeric
-    weather observations.
-    """
 
     print()
     print(
@@ -792,19 +721,17 @@ def fallback_text_extraction(
                 if not line:
                     continue
 
-                # Ignore obvious headings.
+       
                 if looks_like_header([line]):
                     continue
 
-                # Find numeric values.
+
                 numbers = re.findall(
                     r"-?\d+(?:\.\d+)?",
                     line
                 )
 
-                # We need at least three numeric values
-                # for max temperature, min temperature
-                # and rainfall.
+
                 if len(numbers) < 3:
                     continue
 
@@ -813,7 +740,6 @@ def fallback_text_extraction(
                 if len(parts) < 4:
                     continue
 
-                # Try to identify the numeric portion.
                 numeric_positions = []
 
                 for index, part in enumerate(parts):
@@ -914,7 +840,7 @@ def fallback_text_extraction(
     )
 
 
-# ============================================================
+
 # SAVE RAW PDF
 # ============================================================
 
@@ -949,7 +875,6 @@ def save_raw_pdf(
     return filepath
 
 
-# ============================================================
 # SAVE DAILY CSV
 # ============================================================
 
@@ -982,17 +907,10 @@ def save_daily_csv(
     return filepath
 
 
-# ============================================================
 # UPDATE MASTER TIDY DATASET
 # ============================================================
 
 def update_master_dataset(df):
-    """
-    Add the latest observations to the master tidy dataset.
-
-    If the same report date and station already exist,
-    the newer observation replaces the older one.
-    """
 
     print()
     print("=" * 70)
@@ -1043,10 +961,7 @@ def update_master_dataset(df):
         ignore_index=True
     )
 
-    # Remove duplicate observations.
-    #
-    # Keep the LAST record so that if today's workflow
-    # runs more than once, the latest extraction is used.
+
     combined_df.drop_duplicates(
         subset=[
             "report_date",
@@ -1056,7 +971,6 @@ def update_master_dataset(df):
         inplace=True
     )
 
-    # Sort chronologically.
     combined_df.sort_values(
         by=[
             "report_date",
@@ -1065,7 +979,7 @@ def update_master_dataset(df):
         inplace=True
     )
 
-    # Reset index.
+
     combined_df.reset_index(
         drop=True,
         inplace=True
@@ -1089,16 +1003,12 @@ def update_master_dataset(df):
     return combined_df
 
 
-# ============================================================
+
 # CLEAN OLD FILES
 # ============================================================
 
 def cleanup_old_files():
-    """
-    Remove raw PDFs and daily CSV files older than 90 days.
 
-    The master weather_tidy.csv is NOT deleted.
-    """
 
     print()
     print("=" * 70)
@@ -1173,14 +1083,11 @@ def cleanup_old_files():
         )
 
 
-# ============================================================
 # MAIN PIPELINE
 # ============================================================
 
 def main():
-    """
-    Main weather data extraction pipeline.
-    """
+
 
     print()
     print("=" * 70)
@@ -1191,19 +1098,18 @@ def main():
         "Starting weather data extraction..."
     )
 
-    # --------------------------------------------------------
+
     # 1. Create directories
     # --------------------------------------------------------
 
     create_directories()
 
-    # --------------------------------------------------------
+
     # 2. Download latest PDF
     # --------------------------------------------------------
 
     pdf_bytes = download_report()
 
-    # --------------------------------------------------------
     # 3. Extract actual report date
     # --------------------------------------------------------
 
@@ -1211,7 +1117,7 @@ def main():
         pdf_bytes
     )
 
-    # --------------------------------------------------------
+
     # 4. Save raw PDF
     # --------------------------------------------------------
 
@@ -1220,7 +1126,7 @@ def main():
         report_date
     )
 
-    # --------------------------------------------------------
+ 
     # 5. Extract weather data
     # --------------------------------------------------------
 
@@ -1229,7 +1135,7 @@ def main():
         report_date
     )
 
-    # --------------------------------------------------------
+  
     # 6. If standard extraction fails, use fallback parser
     # --------------------------------------------------------
 
@@ -1240,7 +1146,7 @@ def main():
             report_date
         )
 
-    # --------------------------------------------------------
+   
     # 7. Do not continue if no data was extracted.
     # --------------------------------------------------------
 
@@ -1251,7 +1157,7 @@ def main():
             "from the PDF. The dataset was NOT updated."
         )
 
-    # --------------------------------------------------------
+
     # 8. Ensure correct column order
     # --------------------------------------------------------
 
@@ -1267,7 +1173,7 @@ def main():
         expected_columns
     ]
 
-    # --------------------------------------------------------
+
     # 9. Save daily CSV
     # --------------------------------------------------------
 
@@ -1276,7 +1182,7 @@ def main():
         report_date
     )
 
-    # --------------------------------------------------------
+
     # 10. Update master tidy dataset
     # --------------------------------------------------------
 
@@ -1284,13 +1190,13 @@ def main():
         df
     )
 
-    # --------------------------------------------------------
+
     # 11. Remove files older than 90 days
     # --------------------------------------------------------
 
     cleanup_old_files()
 
-    # --------------------------------------------------------
+
     # 12. Display summary
     # --------------------------------------------------------
 
@@ -1319,7 +1225,7 @@ def main():
     print("=" * 70)
 
 
-# ============================================================
+
 # PROGRAM ENTRY POINT
 # ============================================================
 
