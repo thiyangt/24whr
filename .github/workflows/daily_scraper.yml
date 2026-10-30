@@ -1,30 +1,38 @@
-name: Test Meteorology Connection
+name: Daily Weather Scraper
 
 on:
-  workflow_dispatch:
+  schedule:
+    - cron: '30 23 * * *' # Runs daily at 23:30 UTC
+  workflow_dispatch: # Allows manual trigger from the GitHub Actions tab
 
 jobs:
-  test-connection:
+  run-scraper:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required to push generated data back to the repo
 
     steps:
-      - name: Test DNS
-        run: |
-          echo "Testing DNS..."
-          nslookup meteo.gov.lk || true
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Test HTTP
-        run: |
-          echo "Testing HTTP..."
-          curl -I -L --connect-timeout 20 --max-time 60 http://meteo.gov.lk || true
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
 
-      - name: Test HTTPS
+      - name: Install dependencies
         run: |
-          echo "Testing HTTPS..."
-          curl -I -L --connect-timeout 20 --max-time 60 https://meteo.gov.lk || true
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Test PDF
+      - name: Run main weather script
         run: |
-          echo "Testing PDF..."
-          curl -I -L --connect-timeout 20 --max-time 60 \
-            https://meteo.gov.lk/pdfs/twentyfour_pdf.pdf || true
+          python main.py
+
+      - name: Commit and push updated dataset
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add data/
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: update daily weather dataset [skip ci]" && git push)
