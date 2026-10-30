@@ -174,13 +174,13 @@ The data acquisition component is designed to run in an environment that has net
 
 The processed dataset is designed around the following structure:
 
-| Column            | Description                        |
-
-| `report_date`     | Date of the weather report         |
-| `station`         | Meteorological observation station |
-| `max_temperature` | Maximum recorded temperature       |
-| `min_temperature` | Minimum recorded temperature       |
-| `rainfall`        | Daily rainfall measurement         |
+| Column | Description |
+|---|---|
+| `report_date` | Date of the weather report |
+| `station` | Meteorological observation station |
+| `max_temperature` | Maximum recorded temperature |
+| `min_temperature` | Minimum recorded temperature |
+| `rainfall` | Daily rainfall measurement |
 
 Example:
 
